@@ -1,0 +1,3 @@
+[submodule "voc2012_dataset"]
+	path = voc2012_dataset
+	url = git@github.com:louis-she/voc2012-dataset.torch.git

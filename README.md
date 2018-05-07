@@ -40,3 +40,10 @@ The value for `arch` parameter, refer to following table
 ## Demo
 
 Use `jupyter notebook` to open the `demo.ipynb`, there should be no error to run through this notebook
+
+## TODOs
+
+- [ ] A Better Demo.jupyter(Maybe add flow charts to help people get a better understanding)
+- [ ] Training Process
+- [ ] Evaluation Process
+- [ ] Inference Process

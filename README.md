@@ -1,14 +1,14 @@
 # maskrcnn.pytorch
 mask rcnn implemented by pytorch
 
-# requirements
+## Requirements
 
 * python 3.6
 * pytorch 0.4
 
-# Install
+## Install
 
-Download this repo, must have access to `https://github.com/louis-she/voc2012-dataset.torch`
+Download this repo, must have access to https://github.com/louis-she/voc2012-dataset.torch
 
 ```
 git clone git@github.com:louis-she/maskrcnn.pytorch.git --recursive
@@ -29,6 +29,7 @@ python build.py
 ```
 
 The value for `arch` parameter, refer to following table
+
 | GPU | arch |
 | --- | --- |
 | TitanX | sm_52 |
@@ -36,6 +37,6 @@ The value for `arch` parameter, refer to following table
 | GTX 1070 | sm_61 |
 | GTX 1080 (Ti) | sm_61 |
 
-# Demo
+## Demo
 
 Use `jupyter notebook` to open the `demo.ipynb`, there should be no error to run through this notebook

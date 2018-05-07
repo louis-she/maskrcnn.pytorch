@@ -7,6 +7,8 @@ from nms.nms_wrapper import nms
 from utils import apply_box_deltas, clip_boxes, get_iou, log2
 from roialign.roi_align.crop_and_resize import CropAndResizeFunction
 
+device = torch.device("cuda")
+
 """
 ResNet50
 """
@@ -79,22 +81,21 @@ class ResNet50(nn.Module):
     """
 
     def __init__(self):
-        # hypothesis: shape of x is 224 x 224 x 3
         super().__init__()
 
         self.layer1 = nn.Sequential(
-            # Normally, padding set to `kernel_size // 2` to make sure a correct output size
+            # In most cases, padding set to `kernel_size // 2` to make sure a correct output size
             # Refer to the fomular at http://pytorch.org/docs/master/nn.html#torch.nn.Conv2d
             nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3, bias=False), # 112 x 112 x 64
             nn.BatchNorm2d(64),
             nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=3, stride=2, padding=1) # 56 x 56 x 64
+            nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
         )
-        self.layer2 = self.__create_bottlenecks(64, 64, 3, stride=1, downsample=Downsample(64, 256, 1)) # 56 x 56 x 256
-        self.layer3 = self.__create_bottlenecks(256, 128, 4, downsample=Downsample(256, 512, 2)) # 28 x 28 x 512
-        self.layer4 = self.__create_bottlenecks(512, 256, 6, downsample=Downsample(512, 1024, 2)) # 14 x 14 x 1024
-        self.layer5 = self.__create_bottlenecks(1024, 512, 3, downsample=Downsample(1024, 2048, 2)) # 7 x 7 x 2048
-        self.avgpool = nn.AvgPool2d(7, stride=1) # 1 x 1 x 2048
+        self.layer2 = self.__create_bottlenecks(64, 64, 3, stride=1, downsample=Downsample(64, 256, 1))
+        self.layer3 = self.__create_bottlenecks(256, 128, 4, downsample=Downsample(256, 512, 2))
+        self.layer4 = self.__create_bottlenecks(512, 256, 6, downsample=Downsample(512, 1024, 2))
+        self.layer5 = self.__create_bottlenecks(1024, 512, 3, downsample=Downsample(1024, 2048, 2))
+        self.avgpool = nn.AvgPool2d(7, stride=1)
 
     def __create_bottlenecks(self, in_planes, planes, num_blocks, stride=2, downsample=False):
         bottlenecks = []
@@ -272,8 +273,7 @@ class RegionProposal(object):
         scores = scores[:self.score_filter_num]
         index = index[:self.score_filter_num]
 
-        anchors = torch.from_numpy(anchors)[index.data, :]
-        anchors = torch.autograd.Variable(anchors, requires_grad=False)
+        anchors = anchors[index.data, :]
         deltas = deltas[index.data, :]
 
         # 2. apply rpn_delta to anchors to get a refined bbox
@@ -283,16 +283,16 @@ class RegionProposal(object):
         boxes = clip_boxes(refined_anchors, self.original_image_shape)
         # Non-max suppression
         # input: [bbox_size, (y1, x1, y2, x2, score)]
-        _input = torch.cat((boxes, scores.unsqueeze(1)), 1).cuda().data
+        _input = torch.cat((boxes, scores.unsqueeze(1)), 1)
         keep = nms(_input, 0.7)
         keep = keep[:self.proposals_num]
-        boxes = boxes.cuda()[keep, :]
+        boxes = boxes[keep, :]
 
         # 4. normalize coordinate
         height = self.original_image_shape[0]
         width = self.original_image_shape[1]
 
-        norm = torch.autograd.Variable(torch.from_numpy(np.array([height, width, height, width])).double(), requires_grad=False).cuda()
+        norm = torch.tensor( [height, width, height, width], dtype=torch.float64, device=device )
         normalized_boxes = boxes / norm
 
         # Add back batch dimension
@@ -338,7 +338,7 @@ class GenerateTarget(object):
         iou = iou.view(roi_len, gt_box_len)
 
         positive_indexes = (iou > 0.5).cpu()
-        roi_indexes = torch.sum( positive_indexes, dim=1 ).cuda()
+        roi_indexes = torch.sum( positive_indexes, dim=1)
         roi_indexes = torch.nonzero(roi_indexes).squeeze(1)
 
         positive_rois = rois[roi_indexes, :]
@@ -349,12 +349,9 @@ class GenerateTarget(object):
         positive_gtmask = gt_mask[argmax_index]
         positive_gtclass = gt_class[argmax_index]
 
-        box_ids = torch.autograd.Variable(torch.arange(positive_gtmask.size()[0]).int().cuda(), requires_grad=False)
+        box_ids = torch.arange( positive_gtmask.size()[0], dtype=torch.int, device=device )
+        masks = CropAndResizeFunction(self.mask_shape[0], self.mask_shape[1], 0)(positive_gtmask.unsqueeze(1).float(), positive_rois.float(), box_ids)
 
-        positive_gtmask = torch.autograd.Variable(positive_gtmask)
-
-        masks = torch.autograd.Variable(CropAndResizeFunction(self.mask_shape[0], self.mask_shape[1], 0)(
-                positive_gtmask.unsqueeze(1).float(), positive_rois.float(), box_ids).data, requires_grad=False)
         masks = masks.squeeze(1)
         # Threshold mask pixels at 0.5 to have GT masks be 0 or 1 to use with
         # binary cross entropy loss.
@@ -364,20 +361,20 @@ class GenerateTarget(object):
         #    noticed that mask and bbox loss will not be added
         #    for the negative ones
         negative_indexes = (iou < 0.5).cpu()
-        negative_roi_indexes = torch.nonzero(torch.sum( negative_indexes, dim=1 )).cuda().squeeze(1)
+        negative_roi_indexes = torch.nonzero(torch.sum( negative_indexes, dim=1 )).squeeze(1)
         negative_rois = rois[negative_roi_indexes]
 
         negative_keep_num = int(positive_rois.size()[0] // self.pos_neg_ratio)
 
         if not negative_keep_num > negative_rois.size()[0]:
             random_negative_index = torch.randperm( negative_rois.size()[0] )
-            random_negative_keep_index = random_negative_index[:negative_keep_num].cuda()
+            random_negative_keep_index = random_negative_index[:negative_keep_num]
             negative_rois = negative_rois[random_negative_keep_index, :]
 
         negative_count = negative_rois.size()[0]
-        negative_bbox = torch.zeros(negative_count, 4).cuda()
-        negative_mask = torch.zeros(negative_count, self.mask_shape[0], self.mask_shape[1]).cuda()
-        negative_class = torch.zeros(negative_count).cuda()
+        negative_bbox = torch.zeros(negative_count, 4, device=device)
+        negative_mask = torch.zeros(negative_count, self.mask_shape[0], self.mask_shape[1], device=device)
+        negative_class = torch.zeros(negative_count, device=device)
 
         rois = torch.cat((positive_rois, negative_rois), dim=0)
         bbox = torch.cat([positive_gtbox, negative_bbox], dim=0)
@@ -451,15 +448,15 @@ class FPNRoIPooling(object):
         for i, level in enumerate(range(2, 6)):
             feature_map = fpn_feature_maps[i]
             boxes_index_to_this_level = roi_level == level
-            if torch.sum(boxes_index_to_this_level).cpu().data.numpy()[0] == 0:
+            if torch.sum(boxes_index_to_this_level).item() == 0:
                 continue
             boxes_index_to_this_level = torch.nonzero(boxes_index_to_this_level)[:, 0]
             box_to_level.append(boxes_index_to_this_level)
 
             boxes_to_this_level = rpn_output[boxes_index_to_this_level.data]
-            ind = torch.autograd.Variable(torch.zeros(boxes_to_this_level.size()[0]), requires_grad=False).cuda().int()
+            ind = torch.zeros(boxes_to_this_level.size()[0], dtype=torch.int, device=device)
 
-            feature_map = feature_map.float().cuda()
+            feature_map = feature_map.float()
             boxes_to_this_level = boxes_to_this_level.float()
 
             pooled_features = CropAndResizeFunction(self.pool_size, self.pool_size, 0)(feature_map, boxes_to_this_level, ind)
@@ -479,9 +476,7 @@ class FPNRoIPooling(object):
         h = y2 - y1
         w = x2 - x1
 
-        image_area = torch.autograd.Variable(torch.DoubleTensor([float(self.image_shape[0]*self.image_shape[1])]), requires_grad=False)
-        if boxes.is_cuda:
-            image_area = image_area.cuda()
+        image_area = torch.tensor([self.image_shape[0]*self.image_shape[1]], dtype=torch.float64, device=device)
         roi_level = 4 + log2(torch.sqrt(h*w)/(224.0/torch.sqrt(image_area)))
         roi_level = roi_level.round().int()
         roi_level = roi_level.clamp(2,5)
@@ -493,8 +488,8 @@ class GenerateRPNTargets(object):
         self.anchors_size_for_training_in_half = anchors_size_for_training // 2
 
     def forward(self, anchors, gt_boxs):
-        result_class = torch.zeros( (anchors.shape[0]) ).cuda()
-        result_bounding_delta = torch.zeros( (self.anchors_size_for_training_in_half, 4)).double().cuda()
+        result_class = torch.zeros( (anchors.shape[0]) , device=device)
+        result_bounding_delta = torch.zeros( (self.anchors_size_for_training_in_half, 4)).double().to(device)
 
         # 1. compute iou for every anchor & gt_box pair
         gt_boxs_len = gt_boxs.size()[0]
@@ -508,7 +503,7 @@ class GenerateRPNTargets(object):
         # 2. make iou > 0.7 anchor as positive and iou < 0.7 as negative
         _, anchor_iou_max_by_gt_index = torch.max(iou, dim=1)
 
-        anchor_iou_max_by_gt = iou[ torch.arange(iou.size()[0]).cuda().long(), anchor_iou_max_by_gt_index ]
+        anchor_iou_max_by_gt = iou[ torch.arange(iou.size()[0]).to(device).long(), anchor_iou_max_by_gt_index ]
 
         positive_index = torch.nonzero(anchor_iou_max_by_gt[ anchor_iou_max_by_gt > 0.7 ]).squeeze(1)
         negative_index = torch.nonzero(anchor_iou_max_by_gt[ anchor_iou_max_by_gt < 0.3 ]).squeeze(1)
@@ -519,8 +514,8 @@ class GenerateRPNTargets(object):
         diff = positive_index_count - negative_index_count
 
         def random_choice(tensor, size):
-            perm = torch.randperm(tensor.size(0))
-            idx = perm[:size].cuda()
+            perm = torch.randperm(tensor.size(0)).to(device)
+            idx = perm[:size]
             return tensor[idx]
 
         if positive_index_count > self.anchors_size_for_training_in_half:
@@ -559,14 +554,14 @@ class GenerateRPNTargets(object):
             a_center_x = a[1] + 0.5 * a_w
 
             # Compute the bbox refinement that the RPN should predict.
-            result_bounding_delta[i] = torch.from_numpy( np.array(
+            result_bounding_delta[i] = torch.tensor(
                 [
                     (gt_center_y - a_center_y) / a_h,
                     (gt_center_x - a_center_x) / a_w,
                     np.log(gt_h / a_h),
                     np.log(gt_w / a_w)
                 ]
-            , dtype=np.float64 )).cuda()
+            , dtype=torch.float64, device=device )
 
             # Normalize
             # result_bounding_delta[i] /= config.RPN_BBOX_STD_DEV
@@ -585,7 +580,7 @@ def compute_rpn_class_loss(ground_truth, logits):
     """ground truth is (batch_size, anchors_size), anchors_size got posible 3 value:
     -1: represents negative one, 0: ignore, 1: positive one
     """
-    ground_truth = torch.autograd.Variable(ground_truth.squeeze(0))
+    ground_truth = ground_truth.squeeze(0)
     logits = logits.squeeze(0)
 
     valid_idx = torch.nonzero(ground_truth != 0).squeeze(1)
@@ -604,12 +599,10 @@ def compute_rpn_bbox_loss(ground_truth, predicts, rpn_class):
     positive_index = torch.nonzero(rpn_class == 1).squeeze(1)
     predicts = predicts[positive_index]
     ground_truth = ground_truth[:predicts.size()[0]]
-    ground_truth = torch.autograd.Variable(ground_truth)
 
     return F.smooth_l1_loss(predicts, ground_truth)
 
 def compute_mrcnn_class_loss(ground_truth, mrcnn_logits):
-    ground_truth = torch.autograd.Variable(ground_truth, requires_grad=False)
     return F.cross_entropy(mrcnn_logits, ground_truth)
 
 def compute_mrcnn_bbox_loss(gt_bbox, gt_class_id, mrcnn_bbox):
@@ -619,7 +612,6 @@ def compute_mrcnn_bbox_loss(gt_bbox, gt_class_id, mrcnn_bbox):
     class_ids = gt_class_id[positive_index]
     targets = gt_bbox[positive_index, :]
     predicts = mrcnn_bbox[positive_index, class_ids, :]
-    targets = torch.autograd.Variable(targets, requires_grad=False)
 
     return F.smooth_l1_loss(predicts, targets)
 
@@ -630,5 +622,4 @@ def compute_mrcnn_mask_loss(gt_mask, gt_class_id, mrcnn_mask):
     class_ids = gt_class_id[positive_index]
     targets = gt_mask[positive_index, :]
     predicts = mrcnn_mask[positive_index, class_ids, :]
-    targets = torch.autograd.Variable(targets, requires_grad=False)
     return F.binary_cross_entropy(predicts, targets)

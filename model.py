@@ -1,10 +1,12 @@
+import functools
+
 import torch
 from torch import nn
 import torch.nn.functional as F
 import numpy as np
 
 from nms.nms_wrapper import nms
-from utils import apply_box_deltas, clip_boxes, get_iou, log2
+from utils import apply_box_deltas, clip_boxes, get_iou, log2, generate_pyramid_anchors
 from roialign.roi_align.crop_and_resize import CropAndResizeFunction
 
 device = torch.device("cuda")
@@ -205,7 +207,7 @@ class RPN(nn.Module):
 
         return bbox_output, class_logits, softmax
 
-class MaskPredict(nn.Module):
+class Mask(nn.Module):
 
     def __init__(self, num_classes, depth=256, pool_size=14, image_shape=(512, 512)):
         super().__init__()
@@ -379,11 +381,11 @@ class GenerateTarget(object):
         rois = torch.cat((positive_rois, negative_rois), dim=0)
         bbox = torch.cat([positive_gtbox, negative_bbox], dim=0)
         mask = torch.cat([masks.data.double(), negative_mask], dim=0)
-        classes = torch.cat([positive_gtclass, negative_class], dim=0)
+        classes = torch.cat([positive_gtclass, negative_class], dim=0).long()
 
         return rois, bbox, mask, classes
 
-class ClsAndReg(nn.Module):
+class Classifier(nn.Module):
 
     def __init__(self, num_classes, depth=256, pool_size=(7, 7), image_shape=(512, 512)):
         super().__init__()
@@ -485,11 +487,12 @@ class FPNRoIPooling(object):
 class GenerateRPNTargets(object):
 
     def __init__(self, anchors_size_for_training=2000):
+        self.anchors_size_for_training = anchors_size_for_training
         self.anchors_size_for_training_in_half = anchors_size_for_training // 2
 
     def forward(self, anchors, gt_boxs):
         result_class = torch.zeros( (anchors.shape[0]) , device=device)
-        result_bounding_delta = torch.zeros( (self.anchors_size_for_training_in_half, 4)).double().to(device)
+        result_bounding_delta = torch.zeros( (self.anchors_size_for_training, 4)).double().to(device)
 
         # 1. compute iou for every anchor & gt_box pair
         gt_boxs_len = gt_boxs.size()[0]
@@ -505,6 +508,7 @@ class GenerateRPNTargets(object):
 
         anchor_iou_max_by_gt = iou[ torch.arange(iou.size()[0]).to(device).long(), anchor_iou_max_by_gt_index ]
 
+        print(torch.nonzero(anchor_iou_max_by_gt[ anchor_iou_max_by_gt > 0.7 ]).size())
         positive_index = torch.nonzero(anchor_iou_max_by_gt[ anchor_iou_max_by_gt > 0.7 ]).squeeze(1)
         negative_index = torch.nonzero(anchor_iou_max_by_gt[ anchor_iou_max_by_gt < 0.3 ]).squeeze(1)
         # positive index and negative index balanced to 1:1
@@ -570,11 +574,62 @@ class GenerateRPNTargets(object):
 
 class MaskRCNN(nn.Module):
 
-    def __init__(self, input_depth, num_classes=21, pool_size=7, image_shape=(512, 512)):
+    def __init__(self, input_depth=3, num_classes=21, pool_size=7, image_size=512):
         super().__init__()
+        resnet = ResNet50().to(device)
 
-    def forward(self, fpn_feature_maps, rois):
-        pass
+        # create sub networks
+        self.fpn = FPN(*resnet.layers(), out_planes=256).to(device)
+        self.rpn = RPN(256, 512).to(device)
+        self.classifier = Classifier(21).to(device)
+        self.mask = Mask(21).to(device)
+
+        # create anchors
+        self.anchor_scales = [4, 8, 16, 32]
+        self.anchor_ratios = [0.5, 1, 2]
+        self.anchor_feature_stride = [4, 8, 16, 32]
+        anchors = generate_pyramid_anchors(self.anchor_scales, self.anchor_ratios, image_size, self.anchor_feature_stride)
+        self.anchors = torch.tensor(anchors, dtype=torch.float64, device=device)
+
+        # create necessary functions
+        self.region_proposal = RegionProposal().forward
+        self.rpn_target_generate = GenerateRPNTargets().forward
+        self.target_generate = GenerateTarget().forward
+
+    def forward(self, image, gt_bboxes, gt_labels, gt_masks):
+        image = image.permute(2, 0, 1).unsqueeze(0)
+        fpn_feature_maps = self.fpn(image)
+        bbox_deltas, scores, class_logits = self.generate_regions(fpn_feature_maps)
+        rois = self.region_proposal(bbox_deltas, scores, self.anchors).detach()
+        target_rpn_classes, target_rpn_bbox_deltas = self.rpn_target_generate(self.anchors, gt_bboxes)
+        rois, target_bboxes, target_masks, target_classes = self.target_generate(rois, gt_bboxes, gt_masks, gt_labels)
+        pred_class_logits, pred_probs, pred_bboxes = self.classifier(fpn_feature_maps, rois)
+        pred_masks = self.mask(fpn_feature_maps, rois)
+
+        rpn_class_loss = compute_rpn_class_loss(target_rpn_classes, class_logits)
+        rpn_bbox_loss = compute_rpn_bbox_loss(target_rpn_bbox_deltas, bbox_deltas, target_rpn_classes)
+        mrcnn_class_loss = compute_mrcnn_class_loss(  target_classes, pred_class_logits )
+        mrcnn_bbox_loss = compute_mrcnn_bbox_loss(target_bboxes, target_classes, pred_bboxes)
+        mrcnn_mask_loss = compute_mrcnn_mask_loss(target_masks, target_classes, pred_masks)
+
+        loss = rpn_class_loss + rpn_bbox_loss + mrcnn_class_loss + mrcnn_bbox_loss + mrcnn_mask_loss
+
+        return loss
+
+    def generate_regions(self, fpn_feature_maps):
+        rpn_regions = []
+        for o in fpn_feature_maps:
+            rpn_regions.append( self.rpn(o) )
+        bbox_deltas, class_logits, softmax = zip(*rpn_regions)
+
+        def merge(x, y):
+            return torch.cat( (x, y), dim=1 )
+        bbox_deltas = functools.reduce(merge, bbox_deltas[1:], bbox_deltas[0])
+        scores = functools.reduce(merge, class_logits[1:], class_logits[0])
+        class_logits = functools.reduce(merge, class_logits[1:], class_logits[0])
+
+        return bbox_deltas, scores, class_logits
+
 
 def compute_rpn_class_loss(ground_truth, logits):
     """ground truth is (batch_size, anchors_size), anchors_size got posible 3 value:

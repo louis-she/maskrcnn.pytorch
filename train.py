@@ -7,15 +7,18 @@ from voc2012_dataset.dataset import VOC2012ClassSegmentation
 import model
 import utils
 
-def train_epoch(dataset, model, optimizer):
+def train_epoch(dataset, model, optimizer, epoch_number):
     optimizer.zero_grad()
     for index, (image, gt_bboxes, gt_labels, gt_masks) in enumerate(voc_dataset):
+        if index <= 1:
+            continue
         image = torch.tensor(image, dtype=torch.float64, device=device)
         gt_bboxes = torch.tensor(gt_bboxes, dtype=torch.float64, device=device)
         gt_labels = torch.tensor(gt_labels, dtype=torch.float64, device=device)
         gt_masks = torch.tensor(gt_masks, dtype=torch.float64, device=device)
 
         loss = model(image, gt_bboxes, gt_labels, gt_masks)
+        print("epoch {} - batch {} - loss {}".format(epoch_number, index, loss))
         loss.backward()
         optimizer.step()
         optimizer.zero_grad()
@@ -40,4 +43,4 @@ if __name__ == "__main__":
     optimizer = create_optimizer(model)
     epoch = 10
     for i in range(epoch):
-        train_epoch(voc_dataset, model, optimizer)
+        train_epoch(voc_dataset, model, optimizer, i)

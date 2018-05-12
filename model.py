@@ -317,9 +317,9 @@ class GenerateTarget(object):
         we should generate many negative anchors by hand
         """
         rois = rois.squeeze(0)
-        gt_box = gt_box.squeeze(0)
-        gt_mask = gt_mask.squeeze(0)
-        gt_class = gt_class.squeeze(0)
+        # gt_box = gt_box.squeeze(0)
+        # gt_mask = gt_mask.squeeze(0)
+        # gt_class = gt_class.squeeze(0)
 
         # 1. the rois is normalized, so will the gt_box
         gt_box[:, 2] = gt_box[:, 2] / self.image_size[1]
@@ -508,7 +508,6 @@ class GenerateRPNTargets(object):
 
         anchor_iou_max_by_gt = iou[ torch.arange(iou.size()[0]).to(device).long(), anchor_iou_max_by_gt_index ]
 
-        print(torch.nonzero(anchor_iou_max_by_gt[ anchor_iou_max_by_gt > 0.7 ]).size())
         positive_index = torch.nonzero(anchor_iou_max_by_gt[ anchor_iou_max_by_gt > 0.7 ]).squeeze(1)
         negative_index = torch.nonzero(anchor_iou_max_by_gt[ anchor_iou_max_by_gt < 0.3 ]).squeeze(1)
         # positive index and negative index balanced to 1:1
@@ -585,7 +584,7 @@ class MaskRCNN(nn.Module):
         self.mask = Mask(21).to(device)
 
         # create anchors
-        self.anchor_scales = [4, 8, 16, 32]
+        self.anchor_scales = [16, 32, 64, 128]
         self.anchor_ratios = [0.5, 1, 2]
         self.anchor_feature_stride = [4, 8, 16, 32]
         anchors = generate_pyramid_anchors(self.anchor_scales, self.anchor_ratios, image_size, self.anchor_feature_stride)

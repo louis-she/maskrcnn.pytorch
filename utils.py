@@ -119,4 +119,3 @@ def log2(x):
     if x.is_cuda:
         ln2 = ln2.cuda()
     return torch.log(x) / ln2
-

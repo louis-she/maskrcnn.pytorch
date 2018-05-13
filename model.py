@@ -252,10 +252,10 @@ class Mask(nn.Module):
 
 class RegionProposal(object):
 
-    def __init__(self, nms_threshold=0.7, proposals_num=2000, score_filter_num=6000,
+    def __init__(self, nms_threshold=0.7, proposals_num=500, score_filter_num=6000,
             original_image_shape=[512, 512]):
         self.nms_threshold = nms_threshold
-        self.proposals_num = 2000
+        self.proposals_num = proposals_num
         self.score_filter_num = score_filter_num
         self.original_image_shape = original_image_shape
 
@@ -340,7 +340,12 @@ class GenerateTarget(object):
         iou = iou.view(roi_len, gt_box_len)
 
         positive_indexes = (iou > 0.5).cpu()
+
+        # how about no positive index?
         roi_indexes = torch.sum( positive_indexes, dim=1)
+        if roi_indexes.sum().item() == 0:
+            raise RoiNotMatched
+
         roi_indexes = torch.nonzero(roi_indexes).squeeze(1)
 
         positive_rois = rois[roi_indexes, :]
@@ -486,7 +491,7 @@ class FPNRoIPooling(object):
 
 class GenerateRPNTargets(object):
 
-    def __init__(self, anchors_size_for_training=2000):
+    def __init__(self, anchors_size_for_training=500):
         self.anchors_size_for_training = anchors_size_for_training
         self.anchors_size_for_training_in_half = anchors_size_for_training // 2
 
@@ -507,6 +512,10 @@ class GenerateRPNTargets(object):
         _, anchor_iou_max_by_gt_index = torch.max(iou, dim=1)
 
         anchor_iou_max_by_gt = iou[ torch.arange(iou.size()[0]).to(device).long(), anchor_iou_max_by_gt_index ]
+
+        positive_index = torch.nonzero(anchor_iou_max_by_gt[ anchor_iou_max_by_gt > 0.7 ])
+        if positive_index.sum().item() == 0:
+            raise AnchorNotMatched
 
         positive_index = torch.nonzero(anchor_iou_max_by_gt[ anchor_iou_max_by_gt > 0.7 ]).squeeze(1)
         negative_index = torch.nonzero(anchor_iou_max_by_gt[ anchor_iou_max_by_gt < 0.3 ]).squeeze(1)
@@ -613,7 +622,7 @@ class MaskRCNN(nn.Module):
 
         loss = rpn_class_loss + rpn_bbox_loss + mrcnn_class_loss + mrcnn_bbox_loss + mrcnn_mask_loss
 
-        return loss
+        return loss, (rpn_class_loss, rpn_bbox_loss, mrcnn_class_loss, mrcnn_bbox_loss, mrcnn_mask_loss)
 
     def generate_regions(self, fpn_feature_maps):
         rpn_regions = []
@@ -677,3 +686,11 @@ def compute_mrcnn_mask_loss(gt_mask, gt_class_id, mrcnn_mask):
     targets = gt_mask[positive_index, :]
     predicts = mrcnn_mask[positive_index, class_ids, :]
     return F.binary_cross_entropy(predicts, targets)
+
+class RoiNotMatched(Exception):
+    """Raise for no roi matched ground truth bbox"""
+    pass
+
+class AnchorNotMatched(Exception):
+    """Raise for no anchor matched ground truth bbox"""
+    pass
